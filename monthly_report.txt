@@ -1,0 +1,8 @@
+
+✅ Gesamtausgaben für groceries: €-302.22
+
+✅ Gesamtausgaben für fixedCosts: €-593.04
+
+✅ Gesamtausgaben für misc: €-25.99
+
+💰 Gesamt-Ausgaben (alle Kategorien): €-921.25
