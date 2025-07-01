@@ -4,14 +4,12 @@ import os from "os";
 import csv from "csv-parser";
 import { Readable } from "stream";
 
-// External keyword definitions
 import {
   groceryKeywords,
   fixedCostsKeywords,
   excludeKeywords,
 } from "./keywords.js";
 
-// Parse Euro format like "-12,34 €", "1.234,56", or "344"
 function parseEuro(value) {
   if (!value) return 0;
   const cleaned = value
@@ -28,53 +26,34 @@ function keywordRegexList(keywords) {
   return keywords.map((kw) => new RegExp(kw, "i"));
 }
 
-const categories = {
-  groceries: {
-    keywords: keywordRegexList(groceryKeywords),
-    matches: [],
-    total: 0,
-  },
-  fixedCosts: {
-    keywords: keywordRegexList(fixedCostsKeywords),
-    matches: [],
-    total: 0,
-  },
-  misc: {
-    keywords: [],
-    matches: [],
-    total: 0,
-  },
-};
-
-const excludeRegexes = keywordRegexList(excludeKeywords);
-const excludedEntries = [];
-
-// Extract Monat + Jahr from a line like "01.05.2025 - 29.05.2025"
 function extractMonthYearFromLines(lines) {
   const regex = /\b(\d{2})\.(\d{2})\.(\d{4})\s*-\s*(\d{2})\.(\d{2})\.(\d{4})\b/;
-
   for (const line of lines) {
     const cells = line.split(";");
     for (const cell of cells) {
       const match = cell.match(regex);
       if (match) {
-        const [, day, month, year] = match;
-        const date = new Date(`${year}-${month}-${day}`);
-        return date.toLocaleDateString("de-DE", {
+        const [, , month, year] = match;
+        const date = new Date(`${year}-${month}-01`);
+        const label = date.toLocaleDateString("de-DE", {
           month: "long",
           year: "numeric",
         });
+        const filename = `${year}-${month}`;
+        return { label, filename };
       }
     }
   }
-  return null;
+  return { label: "Unbekannt", filename: "unbekannt" };
 }
 
 function loadAndCategorizeCSV(filePath) {
   return new Promise((resolve, reject) => {
     const content = fs.readFileSync(filePath, "utf8");
     const lines = content.split(/\r?\n/);
-    const reportMonthYear = extractMonthYearFromLines(lines) || "Unbekannt";
+
+    const { label: reportMonthYear, filename: reportFilename } =
+      extractMonthYearFromLines(lines);
 
     const headerIndex = lines.findIndex(
       (line) =>
@@ -85,6 +64,27 @@ function loadAndCategorizeCSV(filePath) {
     }
 
     const csvData = lines.slice(headerIndex).join("\n");
+
+    const categories = {
+      groceries: {
+        keywords: keywordRegexList(groceryKeywords),
+        matches: [],
+        total: 0,
+      },
+      fixedCosts: {
+        keywords: keywordRegexList(fixedCostsKeywords),
+        matches: [],
+        total: 0,
+      },
+      misc: {
+        keywords: [],
+        matches: [],
+        total: 0,
+      },
+    };
+
+    const excludeRegexes = keywordRegexList(excludeKeywords);
+    const excludedEntries = [];
 
     Readable.from([csvData])
       .pipe(csv({ separator: ";" }))
@@ -97,7 +97,6 @@ function loadAndCategorizeCSV(filePath) {
 
         const parsedAmount = parseEuro(amountStr);
 
-        // Exclude certain transactions
         if (excludeRegexes.some((regex) => regex.test(recipient))) {
           excludedEntries.push({
             recipient,
@@ -137,76 +136,67 @@ function loadAndCategorizeCSV(filePath) {
         }
       })
       .on("end", () =>
-        resolve({ categories, excludedEntries, reportMonthYear })
+        resolve({
+          categories,
+          excludedEntries,
+          reportMonthYear,
+          reportFilename,
+        })
       )
       .on("error", (err) => reject(err));
   });
 }
 
-async function main() {
-  const filePath = path.join(
-    os.homedir(),
-    "Documents",
-    "bank-statements",
-    "01-12-2024_Umsatzliste_Girokonto.csv"
-  );
+async function generateReportsFromFolder(folderPath) {
+  const files = fs.readdirSync(folderPath).filter((f) => f.endsWith(".csv"));
 
-  if (!fs.existsSync(filePath)) {
-    console.error("❌ CSV file not found:", filePath);
-    process.exit(1);
-  }
+  for (const file of files) {
+    const filePath = path.join(folderPath, file);
+    console.log(`\n📄 Verarbeite Datei: ${file}`);
 
-  console.log("📂 Scanning CSV and categorizing *negative* expenses...");
+    try {
+      const { categories, excludedEntries, reportMonthYear, reportFilename } =
+        await loadAndCategorizeCSV(filePath);
 
-  try {
-    const { categories, excludedEntries, reportMonthYear } =
-      await loadAndCategorizeCSV(filePath);
+      let report = `🗓️ Bericht für: ${reportMonthYear}\n`;
 
-    let fullReport = `🗓️ Bericht für: ${reportMonthYear}\n`;
+      for (const [name, cat] of Object.entries(categories)) {
+        report += `\n📌 Kategorie: ${name} (${cat.matches.length} Treffer)\n`;
+        cat.matches.forEach((m, i) => {
+          report += `${i + 1}. ${m.recipient} → ${m.raw} → €${m.parsed.toFixed(
+            2
+          )}\n`;
+        });
+        report += `\n✅ Gesamtausgaben für ${name}: €${cat.total.toFixed(2)}\n`;
+      }
 
-    for (const [name, cat] of Object.entries(categories)) {
-      console.log(`\n📌 Kategorie: ${name} (${cat.matches.length} Treffer)\n`);
-      cat.matches.forEach((m, i) =>
-        console.log(
-          `${i + 1}. ${m.recipient} → ${m.raw} → €${m.parsed.toFixed(2)}`
-        )
-      );
-      const summaryLine = `\n✅ Gesamtausgaben für ${name}: €${cat.total.toFixed(
+      const totalSum =
+        categories.groceries.total +
+        categories.fixedCosts.total +
+        categories.misc.total;
+      report += `\n💰 Gesamt-Ausgaben (alle Kategorien): €${totalSum.toFixed(
         2
       )}\n`;
-      console.log(summaryLine);
-      fullReport += summaryLine;
-    }
 
-    const totalSum =
-      categories.groceries.total +
-      categories.fixedCosts.total +
-      categories.misc.total;
-
-    const combinedLine = `\n💰 Gesamt-Ausgaben (alle Kategorien): €${totalSum.toFixed(
-      2
-    )}\n`;
-    console.log(combinedLine);
-    fullReport += combinedLine;
-
-    if (excludedEntries.length > 0) {
-      console.log(`\n🚫 Ignorierte Buchungen (${excludedEntries.length}):\n`);
-      excludedEntries.forEach((e, i) =>
-        console.log(
-          `${i + 1}. ${e.recipient} | ${e.usage} → ${
+      if (excludedEntries.length > 0) {
+        report += `\n🚫 Ignorierte Buchungen (${excludedEntries.length}):\n`;
+        excludedEntries.forEach((e, i) => {
+          report += `${i + 1}. ${e.recipient} | ${e.usage} → ${
             e.raw
-          } → €${e.parsed.toFixed(2)}`
-        )
-      );
-    }
+          } → €${e.parsed.toFixed(2)}\n`;
+        });
+      }
 
-    const outputFile = "monthly_report.txt";
-    fs.writeFileSync(outputFile, fullReport);
-    console.log(`\n📁 Report saved to: ${outputFile}`);
-  } catch (err) {
-    console.error("❌ Fehler beim Verarbeiten der CSV:", err);
+      const outputFile = `${reportFilename}_report.txt`;
+      fs.writeFileSync(outputFile, report, "utf8");
+      console.log(`✅ Bericht gespeichert: ${outputFile}`);
+    } catch (err) {
+      console.error("❌ Fehler beim Verarbeiten:", err);
+    }
   }
 }
 
 console.log("Running Node version:", process.version);
-main();
+
+const bankFolder = path.join(os.homedir(), "Documents", "bank-statements");
+generateReportsFromFolder(bankFolder);

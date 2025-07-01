@@ -26,4 +26,5 @@ export const fixedCostsKeywords = [
   "Covivio",
   "Allianz",
   "Deutsche Kreditbank Berlin",
+  "RUNDFUNK ARD, ZDF, DRADIO",
 ];
